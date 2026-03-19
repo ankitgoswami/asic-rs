@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::firmware::WhatsMinerFirmware;
 
-mod rpc;
+pub(crate) mod rpc;
 
 #[derive(Debug)]
 pub struct WhatsMinerV2 {

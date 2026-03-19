@@ -29,6 +29,7 @@ use measurements::{AngularVelocity, Frequency, Power, Temperature};
 pub(crate) use rpc::WhatsMinerRPCAPI;
 use serde_json::{Value, json};
 
+use crate::backends::v2::rpc::WhatsMinerRPCAPI as WhatsMinerV2RPC;
 use crate::firmware::WhatsMinerFirmware;
 
 mod rpc;
@@ -37,6 +38,7 @@ mod rpc;
 pub struct WhatsMinerV3 {
     pub ip: IpAddr,
     pub rpc: WhatsMinerRPCAPI,
+    pub v2_rpc: WhatsMinerV2RPC,
     pub device_info: DeviceInfo,
 }
 
@@ -45,6 +47,7 @@ impl WhatsMinerV3 {
         WhatsMinerV3 {
             ip,
             rpc: WhatsMinerRPCAPI::new(ip, None),
+            v2_rpc: WhatsMinerV2RPC::new(ip, None),
             device_info: DeviceInfo::new(
                 model,
                 WhatsMinerFirmware::default(),
@@ -662,8 +665,8 @@ impl UpgradeFirmware for WhatsMinerV3 {
     }
 }
 
-/// Maps a TuningConfig to the WhatsMiner RPC command name and parameter.
-fn tuning_config_to_rpc(config: &TuningConfig) -> anyhow::Result<(&'static str, Value)> {
+/// Maps a TuningConfig to the WhatsMiner V3 RPC command name and parameter.
+fn tuning_config_to_v3_rpc(config: &TuningConfig) -> anyhow::Result<(&'static str, Value)> {
     match &config.target {
         TuningTarget::MiningMode(mode) => {
             let mode_str = match mode {
@@ -680,15 +683,38 @@ fn tuning_config_to_rpc(config: &TuningConfig) -> anyhow::Result<(&'static str, 
     }
 }
 
+/// Maps a MiningMode to the WhatsMiner V2 RPC command (used as fallback).
+fn mining_mode_to_v2_rpc(mode: &MiningMode) -> &'static str {
+    match mode {
+        MiningMode::Low => "set_low_power",
+        MiningMode::Normal => "set_normal_power",
+        MiningMode::High => "set_high_power",
+    }
+}
+
 #[async_trait]
 impl SupportsTuningConfig for WhatsMinerV3 {
     async fn set_tuning_config(&self, config: TuningConfig) -> anyhow::Result<bool> {
-        let (command, param) = tuning_config_to_rpc(&config)?;
-        let data = self.rpc.send_command(command, true, Some(param)).await;
-        if let Err(ref e) = data {
-            tracing::warn!("set_tuning_config RPC failed: {e}");
+        let (command, param) = tuning_config_to_v3_rpc(&config)?;
+        let result = self.rpc.send_command(command, true, Some(param)).await;
+        if result.is_ok() {
+            return Ok(true);
         }
-        Ok(data.is_ok())
+        if let Err(ref e) = result {
+            tracing::warn!("set_tuning_config V3 RPC failed: {e}");
+        }
+
+        // V3 set.miner.mode not supported — fall back to V2 API on port 4028
+        if let TuningTarget::MiningMode(mode) = &config.target {
+            let v2_cmd = mining_mode_to_v2_rpc(mode);
+            let v2_result = self.v2_rpc.send_command(v2_cmd, true, None).await;
+            if let Err(ref e) = v2_result {
+                tracing::warn!("set_tuning_config V2 fallback RPC failed: {e}");
+            }
+            return Ok(v2_result.is_ok());
+        }
+
+        Ok(false)
     }
 
     fn parse_tuning_config(
@@ -747,7 +773,7 @@ mod tests {
     fn test_tuning_config_to_rpc_mining_mode_low() {
         // Act
         let config = TuningConfig::new(TuningTarget::MiningMode(MiningMode::Low));
-        let (cmd, param) = tuning_config_to_rpc(&config).unwrap();
+        let (cmd, param) = tuning_config_to_v3_rpc(&config).unwrap();
 
         // Assert
         assert_eq!(cmd, "set.miner.mode");
@@ -758,7 +784,7 @@ mod tests {
     fn test_tuning_config_to_rpc_mining_mode_normal() {
         // Act
         let config = TuningConfig::new(TuningTarget::MiningMode(MiningMode::Normal));
-        let (cmd, param) = tuning_config_to_rpc(&config).unwrap();
+        let (cmd, param) = tuning_config_to_v3_rpc(&config).unwrap();
 
         // Assert
         assert_eq!(cmd, "set.miner.mode");
@@ -769,7 +795,7 @@ mod tests {
     fn test_tuning_config_to_rpc_mining_mode_high() {
         // Act
         let config = TuningConfig::new(TuningTarget::MiningMode(MiningMode::High));
-        let (cmd, param) = tuning_config_to_rpc(&config).unwrap();
+        let (cmd, param) = tuning_config_to_v3_rpc(&config).unwrap();
 
         // Assert
         assert_eq!(cmd, "set.miner.mode");
@@ -780,7 +806,7 @@ mod tests {
     fn test_tuning_config_to_rpc_power_limit() {
         // Act
         let config = TuningConfig::new(TuningTarget::Power(Power::from_watts(3000.0)));
-        let (cmd, param) = tuning_config_to_rpc(&config).unwrap();
+        let (cmd, param) = tuning_config_to_v3_rpc(&config).unwrap();
 
         // Assert
         assert_eq!(cmd, "set.miner.power_limit");
@@ -795,7 +821,7 @@ mod tests {
             unit: HashRateUnit::TeraHash,
             algo: "SHA256".to_string(),
         }));
-        let result = tuning_config_to_rpc(&config);
+        let result = tuning_config_to_v3_rpc(&config);
 
         // Assert
         assert!(result.is_err());
@@ -833,6 +859,14 @@ mod tests {
             config.target,
             TuningTarget::Power(Power::from_watts(3600.0))
         );
+    }
+
+    #[test]
+    fn test_mining_mode_to_v2_rpc() {
+        // Assert
+        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::Low), "set_low_power");
+        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::Normal), "set_normal_power");
+        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::High), "set_high_power");
     }
 }
 
