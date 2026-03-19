@@ -711,7 +711,9 @@ impl UpgradeFirmware for WhatsMinerV2 {
 }
 
 /// Maps a TuningConfig to the WhatsMiner V2 RPC command name and parameter.
-fn tuning_config_to_rpc(config: &TuningConfig) -> anyhow::Result<(&'static str, Option<Value>)> {
+pub(crate) fn tuning_config_to_rpc(
+    config: &TuningConfig,
+) -> anyhow::Result<(&'static str, Option<Value>)> {
     match &config.target {
         TuningTarget::MiningMode(mode) => {
             let cmd = match mode {

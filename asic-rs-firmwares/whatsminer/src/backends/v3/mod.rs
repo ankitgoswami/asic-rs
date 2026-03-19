@@ -20,6 +20,7 @@ use asic_rs_core::{
         miner::{MiningMode, TuningTarget},
         pool::{PoolData, PoolGroupData, PoolURL},
     },
+    errors::RPCError,
     traits::{miner::*, model::MinerModel},
 };
 use asic_rs_makes_whatsminer::hardware::WhatsMinerControlBoard;
@@ -29,7 +30,7 @@ use measurements::{AngularVelocity, Frequency, Power, Temperature};
 pub(crate) use rpc::WhatsMinerRPCAPI;
 use serde_json::{Value, json};
 
-use crate::backends::v2::rpc::WhatsMinerRPCAPI as WhatsMinerV2RPC;
+use crate::backends::v2::{rpc::WhatsMinerRPCAPI as WhatsMinerV2RPC, tuning_config_to_rpc};
 use crate::firmware::WhatsMinerFirmware;
 
 mod rpc;
@@ -683,15 +684,6 @@ fn tuning_config_to_v3_rpc(config: &TuningConfig) -> anyhow::Result<(&'static st
     }
 }
 
-/// Maps a MiningMode to the WhatsMiner V2 RPC command (used as fallback).
-fn mining_mode_to_v2_rpc(mode: &MiningMode) -> &'static str {
-    match mode {
-        MiningMode::Low => "set_low_power",
-        MiningMode::Normal => "set_normal_power",
-        MiningMode::High => "set_high_power",
-    }
-}
-
 #[async_trait]
 impl SupportsTuningConfig for WhatsMinerV3 {
     async fn set_tuning_config(&self, config: TuningConfig) -> anyhow::Result<bool> {
@@ -700,21 +692,24 @@ impl SupportsTuningConfig for WhatsMinerV3 {
         if result.is_ok() {
             return Ok(true);
         }
-        if let Err(ref e) = result {
-            tracing::warn!("set_tuning_config V3 RPC failed: {e}");
-        }
 
-        // V3 set.miner.mode not supported — fall back to V2 API on port 4028
-        if let TuningTarget::MiningMode(mode) = &config.target {
-            let v2_cmd = mining_mode_to_v2_rpc(mode);
-            let v2_result = self.v2_rpc.send_command(v2_cmd, true, None).await;
+        let err = result.unwrap_err();
+        tracing::warn!("set_tuning_config V3 RPC failed: {err}");
+
+        // Only fall back to V2 when the miner responded but rejected the command
+        // (StatusCheckFailed), not on connection or deserialization errors.
+        if let TuningTarget::MiningMode(_) = &config.target
+            && err.downcast_ref::<RPCError>().is_some()
+        {
+            let (v2_cmd, v2_param) = tuning_config_to_rpc(&config)?;
+            let v2_result = self.v2_rpc.send_command(v2_cmd, true, v2_param).await;
             if let Err(ref e) = v2_result {
                 tracing::warn!("set_tuning_config V2 fallback RPC failed: {e}");
             }
             return Ok(v2_result.is_ok());
         }
 
-        Ok(false)
+        Err(err)
     }
 
     fn parse_tuning_config(
@@ -725,7 +720,9 @@ impl SupportsTuningConfig for WhatsMinerV3 {
             .get(&ConfigField::Tuning)
             .ok_or_else(|| anyhow::anyhow!("No tuning data in status summary"))?;
 
-        if let Some(mode_str) = summary.get("power-mode").and_then(Value::as_str) {
+        if let Some(mode_str) = summary.get("power-mode").and_then(Value::as_str)
+            && !mode_str.is_empty()
+        {
             let mode = match mode_str.to_lowercase().as_str() {
                 "low" => MiningMode::Low,
                 "normal" => MiningMode::Normal,
@@ -862,14 +859,23 @@ mod tests {
     }
 
     #[test]
-    fn test_mining_mode_to_v2_rpc() {
-        // Assert
-        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::Low), "set_low_power");
-        assert_eq!(
-            mining_mode_to_v2_rpc(&MiningMode::Normal),
-            "set_normal_power"
+    fn test_parse_tuning_config_empty_power_mode_falls_back_to_limit() {
+        // Arrange
+        let miner = WhatsMinerV3::new(IpAddr::from([127, 0, 0, 1]), WhatsMinerModel::M60SVK30);
+        let mut data = HashMap::new();
+        data.insert(
+            ConfigField::Tuning,
+            json!({"power-mode": "", "power-limit": 3600}),
         );
-        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::High), "set_high_power");
+
+        // Act
+        let config = miner.parse_tuning_config(&data).unwrap();
+
+        // Assert
+        assert_eq!(
+            config.target,
+            TuningTarget::Power(Power::from_watts(3600.0))
+        );
     }
 }
 
