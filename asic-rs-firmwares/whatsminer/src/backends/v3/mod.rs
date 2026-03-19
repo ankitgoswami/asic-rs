@@ -865,7 +865,10 @@ mod tests {
     fn test_mining_mode_to_v2_rpc() {
         // Assert
         assert_eq!(mining_mode_to_v2_rpc(&MiningMode::Low), "set_low_power");
-        assert_eq!(mining_mode_to_v2_rpc(&MiningMode::Normal), "set_normal_power");
+        assert_eq!(
+            mining_mode_to_v2_rpc(&MiningMode::Normal),
+            "set_normal_power"
+        );
         assert_eq!(mining_mode_to_v2_rpc(&MiningMode::High), "set_high_power");
     }
 }
