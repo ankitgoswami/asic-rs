@@ -181,7 +181,7 @@ impl GetDataLocations for WhatsMinerV2 {
                 RPC_SUMMARY,
                 DataExtractor {
                     func: get_by_pointer,
-                    key: Some("/SUMMARY/0/Power Limit"),
+                    key: Some("/SUMMARY/0"),
                     tag: None,
                 },
             )],
@@ -471,8 +471,22 @@ impl GetWattage for WhatsMinerV2 {
 }
 impl GetTuningTarget for WhatsMinerV2 {
     fn parse_tuning_target(&self, data: &HashMap<DataField, Value>) -> Option<TuningTarget> {
-        data.extract_map::<f64, _>(DataField::TuningTarget, Power::from_watts)
-            .map(TuningTarget::Power)
+        let summary = data.get(&DataField::TuningTarget)?;
+        if let Some(mode_str) = summary.get("Power Mode").and_then(Value::as_str)
+            && !mode_str.is_empty()
+        {
+            let mode = match mode_str.to_lowercase().as_str() {
+                "low" => MiningMode::Low,
+                "normal" => MiningMode::Normal,
+                "high" => MiningMode::High,
+                _ => return None,
+            };
+            return Some(TuningTarget::MiningMode(mode));
+        }
+        summary
+            .get("Power Limit")
+            .and_then(Value::as_f64)
+            .map(|w| TuningTarget::Power(Power::from_watts(w)))
     }
 }
 impl GetLightFlashing for WhatsMinerV2 {
@@ -1006,7 +1020,7 @@ mod integration_tests {
         assert_eq!(miner_data.wattage, Some(Power::from_watts(3200.0)));
         assert_eq!(
             miner_data.tuning_target,
-            Some(TuningTarget::Power(Power::from_watts(3300.0)))
+            Some(TuningTarget::MiningMode(MiningMode::Normal))
         );
         assert_eq!(miner_data.uptime, Some(Duration::from_secs(25000)));
         assert!(miner_data.is_mining);

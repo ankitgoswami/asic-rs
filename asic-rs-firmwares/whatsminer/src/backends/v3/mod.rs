@@ -176,7 +176,7 @@ impl GetDataLocations for WhatsMinerV3 {
                 rpc_get_miner_status_summary,
                 DataExtractor {
                     func: get_by_pointer,
-                    key: Some("/msg/summary/power-limit"),
+                    key: Some("/msg/summary"),
                     tag: None,
                 },
             )],
@@ -460,8 +460,22 @@ impl GetWattage for WhatsMinerV3 {
 }
 impl GetTuningTarget for WhatsMinerV3 {
     fn parse_tuning_target(&self, data: &HashMap<DataField, Value>) -> Option<TuningTarget> {
-        data.extract_map::<f64, _>(DataField::TuningTarget, Power::from_watts)
-            .map(TuningTarget::Power)
+        let summary = data.get(&DataField::TuningTarget)?;
+        if let Some(mode_str) = summary.get("power-mode").and_then(Value::as_str)
+            && !mode_str.is_empty()
+        {
+            let mode = match mode_str.to_lowercase().as_str() {
+                "low" => MiningMode::Low,
+                "normal" => MiningMode::Normal,
+                "high" => MiningMode::High,
+                _ => return None,
+            };
+            return Some(TuningTarget::MiningMode(mode));
+        }
+        summary
+            .get("power-limit")
+            .and_then(Value::as_f64)
+            .map(|w| TuningTarget::Power(Power::from_watts(w)))
     }
 }
 impl GetLightFlashing for WhatsMinerV3 {
@@ -699,7 +713,7 @@ impl SupportsTuningConfig for WhatsMinerV3 {
         // Only fall back to V2 when the miner responded but rejected the command
         // (StatusCheckFailed), not on connection or deserialization errors.
         if let TuningTarget::MiningMode(_) = &config.target
-            && err.downcast_ref::<RPCError>().is_some()
+            && matches!(err.downcast_ref::<RPCError>(), Some(RPCError::StatusCheckFailed(_)))
         {
             let (v2_cmd, v2_param) = tuning_config_to_rpc(&config)?;
             let v2_result = self.v2_rpc.send_command(v2_cmd, true, v2_param).await;
